@@ -7,3 +7,10 @@ pypdf
 python-docx
 pytest
 httpx
+sqlalchemy
+psycopg2-binary
+bcrypt
+python-jose[cryptography]
+google-auth
+requests
+email-validator

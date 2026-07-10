@@ -98,6 +98,8 @@ header p {
 /* --- Inputs --- */
 input[type="file"],
 input[type="text"],
+input[type="password"],
+input[type="email"],
 select {
   width: 100%;
   padding: 0.75rem 0.9rem;
@@ -111,10 +113,14 @@ select {
   transition: border-color 0.2s ease, background 0.2s ease;
 }
 
-input[type="text"]::placeholder { color: var(--muted); }
+input[type="text"]::placeholder,
+input[type="password"]::placeholder,
+input[type="email"]::placeholder { color: var(--muted); }
 
 input[type="file"]:focus,
-input[type="text"]:focus {
+input[type="text"]:focus,
+input[type="password"]:focus,
+input[type="email"]:focus {
   border-color: var(--accent);
   background: rgba(255, 255, 255, 0.1);
 }
@@ -203,3 +209,49 @@ button:disabled {
 .step-title { font-weight: 600; color: var(--text); }
 
 .hidden { display: none; }
+
+#authCard {
+  text-align: center;
+}
+
+#authCard h2 {
+  justify-content: center;
+}
+
+#authCard input {
+  text-align: left;
+}
+
+#authCard > div[style*="flex"] {
+  justify-content: center;
+}
+
+/* --- Google Sign-In button wrapper --- */
+.google-btn-wrapper {
+  display: flex;
+  justify-content: center;
+  margin: 0.75rem 0 1.25rem 0;
+}
+
+/* --- "or" divider between Google button and email form --- */
+.auth-divider {
+  display: flex;
+  align-items: center;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 400;
+  margin: 1rem 0 1.25rem 0;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  content: "";
+  flex: 1;
+  border-bottom: 1px solid var(--glass-border);
+}
+
+.auth-divider span {
+  padding: 0 0.85rem;
+  white-space: nowrap;
+}

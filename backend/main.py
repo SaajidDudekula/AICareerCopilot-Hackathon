@@ -16,28 +16,22 @@ http://localhost:8000).
 import os
 import io
 import json
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+import uuid
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-from openai import OpenAI
 from pypdf import PdfReader
 from docx import Document
+from sqlalchemy.orm import Session
+
+from database import get_db
+import models
+import auth
+from auth_routes import router as auth_router
+from interview_routes import router as interview_router
+from mesh_client import client, HAIKU, SONNET
 
 load_dotenv()
-
-MESH_API_KEY = os.getenv("MESH_API_KEY")
-if not MESH_API_KEY or MESH_API_KEY == "mesh_sk_your_key_here":
-    raise RuntimeError(
-        "MESH_API_KEY is not set. Create a .env file in this folder with your real key."
-    )
-
-client = OpenAI(
-    base_url="https://api.meshapi.ai/v1",
-    api_key=MESH_API_KEY,
-)
-
-HAIKU = "anthropic/claude-haiku-4.5"
-SONNET = "anthropic/claude-sonnet-4.6"
 
 # --- Basic abuse / cost-control limits ---
 MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024   # 5 MB — plenty for any real resume
@@ -64,6 +58,9 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
+app.include_router(interview_router, prefix="/api/interview", tags=["interview"])
 
 RESUME_PARSE_PROMPT = """Extract the following information from the resume text below and return ONLY valid JSON with this exact structure, no extra commentary, no markdown fences:
 
@@ -223,9 +220,14 @@ def health_check():
 
 
 @app.post("/api/parse-resume")
-async def parse_resume(file: UploadFile = File(...)):
+async def parse_resume(
+    file: UploadFile = File(...),
+    current_user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db),
+):
     """Accepts a resume file (.txt, .pdf, or .docx), extracts its text,
-    then sends it to Claude (via Mesh API) for structured parsing."""
+    sends it to Claude (via Mesh API) for structured parsing, and saves
+    the result to the database under the logged-in user."""
     contents = await file.read()
 
     if len(contents) > MAX_FILE_SIZE_BYTES:
@@ -240,14 +242,34 @@ async def parse_resume(file: UploadFile = File(...)):
 
     prompt = RESUME_PARSE_PROMPT.format(resume_text=resume_text)
     result = call_model(HAIKU, prompt, max_tokens=1000)
+
+    resume_record = models.Resume(
+        user_id=current_user.id,
+        original_filename=file.filename,
+        raw_text=resume_text,
+        parsed_json=result["data"],
+    )
+    db.add(resume_record)
+    db.commit()
+    db.refresh(resume_record)
+
+    result["resume_id"] = str(resume_record.id)
     return result
 
 
 @app.post("/api/skill-gap")
-async def skill_gap(role: str = Form(...), skills: str = Form(...)):
+async def skill_gap(
+    role: str = Form(...),
+    skills: str = Form(...),
+    resume_id: str = Form(None),
+    current_user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db),
+):
     """Takes a target role and a skills summary (free text, e.g. the
     'skills' array from the parsed resume joined into a sentence) and
-    returns a skill gap analysis + roadmap."""
+    returns a skill gap analysis + roadmap. If resume_id is provided
+    (from a prior /api/parse-resume call), the analysis is linked to
+    that resume in the database."""
     role = role.strip()
     skills = skills.strip()
 
@@ -266,4 +288,36 @@ async def skill_gap(role: str = Form(...), skills: str = Form(...)):
 
     prompt = SKILL_GAP_PROMPT.format(role=role, skills=skills)
     result = call_model(SONNET, prompt, max_tokens=3000)
+
+    if resume_id:
+        # Verify the resume belongs to this user before linking to it —
+        # never trust a resume_id blindly just because it was supplied.
+        # Also guard against a malformed (non-UUID) resume_id: without this
+        # check, PostgreSQL itself raises an error comparing a bad string
+        # against a UUID column, which would surface as a raw 500 for what
+        # should just be "couldn't link, no big deal" — resume_id is
+        # optional metadata here, not the endpoint's primary resource.
+        try:
+            uuid.UUID(resume_id)
+            resume_id_is_valid = True
+        except (ValueError, AttributeError, TypeError):
+            resume_id_is_valid = False
+
+        resume = None
+        if resume_id_is_valid:
+            resume = (
+                db.query(models.Resume)
+                .filter(models.Resume.id == resume_id, models.Resume.user_id == current_user.id)
+                .first()
+            )
+        if resume:
+            analysis = models.ResumeAnalysis(
+                resume_id=resume.id,
+                target_role=role,
+                skill_gap_json=result["data"],
+                job_readiness_score=str(result["data"].get("job_readiness_score", "")),
+            )
+            db.add(analysis)
+            db.commit()
+
     return result

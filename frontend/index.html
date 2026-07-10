@@ -4,6 +4,8 @@
 <meta charset="UTF-8" />
 <title>AI Career Copilot - Demo</title>
 <link rel="stylesheet" href="styles.css" />
+<script src="config.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 <div class="container">
@@ -23,8 +25,38 @@
     <p>Upload a resume &rarr; get your skill gap &rarr; get your roadmap. Powered by Mesh API + Claude.</p>
   </header>
 
+  <!-- AUTH: logged-out view -->
+  <div class="card" id="authCard">
+    <h2>Sign in to continue</h2>
+
+    <div id="g_id_onload"
+         data-callback="handleGoogleCredentialResponse">
+    </div>
+    <div class="google-btn-wrapper">
+      <div id="googleSignInButton"></div>
+    </div>
+
+    <div class="auth-divider"><span>or use email + password</span></div>
+
+    <input type="text" id="regName" placeholder="Name (for new account)" />
+    <input type="text" id="authEmail" placeholder="Email" />
+    <input type="password" id="authPassword" placeholder="Password" />
+    <div style="display:flex; gap:0.75rem;">
+      <button onclick="login()">Log In</button>
+      <button onclick="register()">Register</button>
+    </div>
+    <div class="status" id="authStatus"></div>
+    <div class="error" id="authError"></div>
+  </div>
+
+  <!-- AUTH: logged-in view -->
+  <div class="card hidden" id="loggedInCard">
+    <h2>Welcome, <span id="loggedInName"></span></h2>
+    <button onclick="logout()">Log Out</button>
+  </div>
+
   <!-- STEP 1: Resume Upload -->
-  <div class="card">
+  <div class="card hidden" id="uploadCard">
     <h2>Step 1 — Upload Resume</h2>
     <p class="muted-small">Upload your resume as .txt, .pdf, or .docx.</p>
     <input type="file" id="resumeFile" accept=".txt,.pdf,.docx" />
@@ -65,12 +97,212 @@
     <div id="recommendedProjects"></div>
 
     <div class="muted-small" id="gapCost"></div>
+    <button onclick="showInterviewCard()" style="margin-top:1.5rem;">Continue to Mock Interview →</button>
+  </div>
+
+  <!-- STEP 3: Mock Interview -->
+  <div class="card hidden" id="interviewIntroCard">
+    <h2>Step 3 — AI Mock Interview</h2>
+    <p class="muted-small">A short 4-question mock interview for your target role, with feedback after each answer and a final score.</p>
+    <button onclick="startInterview()">Start Interview</button>
+    <div class="status" id="interviewStartStatus"></div>
+    <div class="error" id="interviewStartError"></div>
+  </div>
+
+  <div class="card hidden" id="interviewSessionCard">
+    <h2>Question <span id="interviewQNum">1</span> of <span id="interviewQTotal">4</span></h2>
+    <div id="interviewChatLog"></div>
+    <textarea id="interviewAnswerInput" placeholder="Type your answer here..." rows="4"
+      style="width:100%; margin-top:0.75rem; padding:0.75rem 0.9rem; border-radius:12px; border:1px solid var(--glass-border); background:rgba(255,255,255,0.06); color:var(--text); font-family:inherit; font-size:0.95rem;"></textarea>
+    <button id="interviewSubmitBtn" onclick="submitInterviewAnswer()">Submit Answer</button>
+    <div class="status" id="interviewAnswerStatus"></div>
+    <div class="error" id="interviewAnswerError"></div>
+  </div>
+
+  <div class="card hidden" id="interviewReportCard">
+    <h2>Interview Complete</h2>
+    <div class="score-badge" id="interviewScore">-</div>
+    <p id="interviewFinalFeedback" style="margin-top:1rem;"></p>
+    <h2 style="margin-top:1.5rem;">Strengths</h2>
+    <div id="interviewStrengths"></div>
+    <h2 style="margin-top:1.5rem;">Areas to Improve</h2>
+    <div id="interviewImprovements"></div>
   </div>
 </div>
 
 <script>
-const API_BASE = "http://localhost:8000";
+const API_BASE = CONFIG.API_BASE;
 let parsedResumeData = null;
+let currentResumeId = null;
+
+// Initialize Google Sign-In using CONFIG (not a static HTML attribute) —
+// this guarantees the real Client ID from config.js is used, with no
+// risk of a race condition between our config loading and Google's script.
+window.addEventListener("load", function () {
+  if (typeof google === "undefined" || !google.accounts) {
+    console.warn("Google Identity Services script did not load — Google Sign-In will be unavailable.");
+    return;
+  }
+  google.accounts.id.initialize({
+    client_id: CONFIG.GOOGLE_CLIENT_ID,
+    callback: handleGoogleCredentialResponse,
+  });
+  google.accounts.id.renderButton(
+    document.getElementById("googleSignInButton"),
+    {
+      type: "standard",
+      shape: "rectangular",
+      theme: "outline",
+      text: "signin_with",
+      size: "large",
+      logo_alignment: "left",
+      width: 300,
+    }
+  );
+});
+
+// --- Auth state ---
+// Tokens are kept in memory (a JS variable) and mirrored to localStorage
+// only so a page refresh doesn't force a re-login during development/demo.
+// This is a real webpage (not a Claude artifact), so localStorage is fine
+// here — just be aware XSS would be able to read it, same as most SPAs;
+// httpOnly cookies are the more robust pattern for a production app later.
+let accessToken = localStorage.getItem("accessToken") || null;
+let refreshToken = localStorage.getItem("refreshToken") || null;
+
+function setTokens(access, refresh) {
+  accessToken = access;
+  refreshToken = refresh;
+  localStorage.setItem("accessToken", access);
+  localStorage.setItem("refreshToken", refresh);
+}
+
+function clearTokens() {
+  accessToken = null;
+  refreshToken = null;
+  localStorage.removeItem("accessToken");
+  localStorage.removeItem("refreshToken");
+}
+
+function showLoggedInUI(userName) {
+  document.getElementById("authCard").classList.add("hidden");
+  document.getElementById("loggedInCard").classList.remove("hidden");
+  document.getElementById("uploadCard").classList.remove("hidden");
+  document.getElementById("loggedInName").textContent = userName;
+}
+
+function showLoggedOutUI() {
+  document.getElementById("authCard").classList.remove("hidden");
+  document.getElementById("loggedInCard").classList.add("hidden");
+  document.getElementById("uploadCard").classList.add("hidden");
+  document.getElementById("roleCard").classList.add("hidden");
+  document.getElementById("parsedCard").classList.add("hidden");
+  document.getElementById("resultsCard").classList.add("hidden");
+}
+
+async function fetchMe() {
+  const res = await fetch(`${API_BASE}/api/auth/me`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) throw new Error("Session expired.");
+  return res.json();
+}
+
+// On page load, if we already have a token, check it's still valid.
+(async function initAuth() {
+  if (!accessToken) return;
+  try {
+    const me = await fetchMe();
+    showLoggedInUI(me.name);
+  } catch (e) {
+    clearTokens();
+    showLoggedOutUI();
+  }
+})();
+
+async function register() {
+  const name = document.getElementById("regName").value.trim();
+  const email = document.getElementById("authEmail").value.trim();
+  const password = document.getElementById("authPassword").value;
+  const statusEl = document.getElementById("authStatus");
+  const errorEl = document.getElementById("authError");
+  errorEl.textContent = "";
+
+  try {
+    statusEl.textContent = "Creating account...";
+    const res = await fetch(`${API_BASE}/api/auth/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, email, password }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Registration failed.");
+    setTokens(data.access_token, data.refresh_token);
+    showLoggedInUI(data.user.name);
+    statusEl.textContent = "";
+  } catch (e) {
+    errorEl.textContent = e.message;
+    statusEl.textContent = "";
+  }
+}
+
+async function login() {
+  const email = document.getElementById("authEmail").value.trim();
+  const password = document.getElementById("authPassword").value;
+  const statusEl = document.getElementById("authStatus");
+  const errorEl = document.getElementById("authError");
+  errorEl.textContent = "";
+
+  try {
+    statusEl.textContent = "Logging in...";
+    const res = await fetch(`${API_BASE}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Login failed.");
+    setTokens(data.access_token, data.refresh_token);
+    showLoggedInUI(data.user.name);
+    statusEl.textContent = "";
+  } catch (e) {
+    errorEl.textContent = e.message;
+    statusEl.textContent = "";
+  }
+}
+
+// Called automatically by Google's Identity Services script once someone
+// signs in with the Google button — see the data-callback attribute on
+// the #g_id_onload div above.
+async function handleGoogleCredentialResponse(response) {
+  const errorEl = document.getElementById("authError");
+  const statusEl = document.getElementById("authStatus");
+  errorEl.textContent = "";
+  try {
+    statusEl.textContent = "Signing in with Google...";
+    const res = await fetch(`${API_BASE}/api/auth/google`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id_token: response.credential }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Google sign-in failed.");
+    setTokens(data.access_token, data.refresh_token);
+    showLoggedInUI(data.user.name);
+    statusEl.textContent = "";
+  } catch (e) {
+    errorEl.textContent = e.message;
+    statusEl.textContent = "";
+  }
+}
+
+function logout() {
+  clearTokens();
+  parsedResumeData = null;
+  currentResumeId = null;
+  currentInterviewId = null;
+  showLoggedOutUI();
+}
 
 async function parseResume() {
   const fileInput = document.getElementById("resumeFile");
@@ -93,6 +325,7 @@ async function parseResume() {
   try {
     const res = await fetch(`${API_BASE}/api/parse-resume`, {
       method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}` },
       body: formData,
     });
     if (!res.ok) {
@@ -101,6 +334,7 @@ async function parseResume() {
     }
     const result = await res.json();
     parsedResumeData = result.data;
+    currentResumeId = result.resume_id || null;
     renderParsedResume(result);
     document.getElementById("roleCard").classList.remove("hidden");
     statusEl.textContent = "Done.";
@@ -154,10 +388,14 @@ async function getSkillGap() {
   const formData = new FormData();
   formData.append("role", role);
   formData.append("skills", skillsSummary);
+  if (currentResumeId) {
+    formData.append("resume_id", currentResumeId);
+  }
 
   try {
     const res = await fetch(`${API_BASE}/api/skill-gap`, {
       method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}` },
       body: formData,
     });
     if (!res.ok) {
@@ -213,6 +451,133 @@ function renderSkillGap(result) {
 
   document.getElementById("gapCost").textContent =
     `Tokens used: ${result.usage.input_tokens} in / ${result.usage.output_tokens} out`;
+}
+
+// --- Step 3: AI Mock Interview ---
+
+let currentInterviewId = null;
+
+function showInterviewCard() {
+  document.getElementById("interviewIntroCard").classList.remove("hidden");
+  document.getElementById("interviewIntroCard").scrollIntoView({ behavior: "smooth" });
+}
+
+function appendChatMessage(role, text) {
+  const log = document.getElementById("interviewChatLog");
+  const div = document.createElement("div");
+  div.className = "step-item";
+  const label = role === "assistant" ? "Interviewer" : "You";
+  div.innerHTML = `<strong>${label}:</strong> ${text}`;
+  log.appendChild(div);
+}
+
+async function startInterview() {
+  const statusEl = document.getElementById("interviewStartStatus");
+  const errorEl = document.getElementById("interviewStartError");
+  errorEl.textContent = "";
+
+  const role = document.getElementById("targetRole").value.trim() || "Software Development Engineer";
+
+  const formData = new FormData();
+  formData.append("target_role", role);
+
+  try {
+    statusEl.textContent = "Starting your mock interview...";
+    const res = await fetch(`${API_BASE}/api/interview/start`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}` },
+      body: formData,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Could not start interview.");
+
+    currentInterviewId = data.interview_id;
+    document.getElementById("interviewIntroCard").classList.add("hidden");
+    document.getElementById("interviewSessionCard").classList.remove("hidden");
+    document.getElementById("interviewChatLog").innerHTML = "";
+    document.getElementById("interviewQNum").textContent = data.question_number;
+    document.getElementById("interviewQTotal").textContent = data.total_questions;
+    appendChatMessage("assistant", data.message);
+    statusEl.textContent = "";
+  } catch (err) {
+    errorEl.textContent = err.message;
+    statusEl.textContent = "";
+  }
+}
+
+async function submitInterviewAnswer() {
+  const statusEl = document.getElementById("interviewAnswerStatus");
+  const errorEl = document.getElementById("interviewAnswerError");
+  const btn = document.getElementById("interviewSubmitBtn");
+  const answerInput = document.getElementById("interviewAnswerInput");
+  errorEl.textContent = "";
+
+  const answer = answerInput.value.trim();
+  if (!answer) {
+    errorEl.textContent = "Please type an answer first.";
+    return;
+  }
+
+  btn.disabled = true;
+  statusEl.textContent = "Thinking... (a few seconds)";
+
+  appendChatMessage("user", answer);
+  answerInput.value = "";
+
+  const formData = new FormData();
+  formData.append("interview_id", currentInterviewId);
+  formData.append("answer", answer);
+
+  try {
+    const res = await fetch(`${API_BASE}/api/interview/answer`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}` },
+      body: formData,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Something went wrong.");
+
+    if (data.is_final) {
+      document.getElementById("interviewSessionCard").classList.add("hidden");
+      renderInterviewReport(data);
+    } else {
+      document.getElementById("interviewQNum").textContent = data.question_number;
+      appendChatMessage("assistant", data.message);
+    }
+    statusEl.textContent = "";
+  } catch (err) {
+    errorEl.textContent = err.message;
+    statusEl.textContent = "";
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderInterviewReport(data) {
+  const card = document.getElementById("interviewReportCard");
+  card.classList.remove("hidden");
+  card.scrollIntoView({ behavior: "smooth" });
+
+  document.getElementById("interviewScore").textContent = `${data.score}/10`;
+  document.getElementById("interviewFinalFeedback").textContent = data.final_feedback || "";
+
+  const strengthsEl = document.getElementById("interviewStrengths");
+  strengthsEl.innerHTML = "";
+  (data.strengths || []).forEach(s => {
+    const div = document.createElement("div");
+    div.className = "gap-item priority-low";
+    div.textContent = s;
+    strengthsEl.appendChild(div);
+  });
+
+  const improvementsEl = document.getElementById("interviewImprovements");
+  improvementsEl.innerHTML = "";
+  (data.improvement_points || []).forEach(s => {
+    const div = document.createElement("div");
+    div.className = "gap-item priority-medium";
+    div.textContent = s;
+    improvementsEl.appendChild(div);
+  });
 }
 </script>
 </body>
