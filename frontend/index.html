@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>AI Career Copilot - Demo</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="container">
+  <header>
+    <svg class="header-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="12" cy="12" r="10" stroke="url(#targetGradient)" stroke-width="1.5"/>
+      <circle cx="12" cy="12" r="6" stroke="url(#targetGradient)" stroke-width="1.5"/>
+      <circle cx="12" cy="12" r="2" fill="url(#targetGradient)"/>
+      <defs>
+        <linearGradient id="targetGradient" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+          <stop stop-color="#7C9CFF"/>
+          <stop offset="1" stop-color="#A78BFA"/>
+        </linearGradient>
+      </defs>
+    </svg>
+    <h1>AI Career Copilot</h1>
+    <p>Upload a resume &rarr; get your skill gap &rarr; get your roadmap. Powered by Mesh API + Claude.</p>
+  </header>
+
+  <!-- STEP 1: Resume Upload -->
+  <div class="card">
+    <h2>Step 1 — Upload Resume</h2>
+    <p class="muted-small">Upload your resume as .txt, .pdf, or .docx.</p>
+    <input type="file" id="resumeFile" accept=".txt,.pdf,.docx" />
+    <button id="parseBtn" onclick="parseResume()">Parse Resume</button>
+    <div class="status" id="parseStatus"></div>
+    <div class="error" id="parseError"></div>
+  </div>
+
+  <!-- Parsed Resume Output -->
+  <div class="card hidden" id="parsedCard">
+    <h2>Parsed Resume</h2>
+    <p><strong id="parsedName"></strong></p>
+    <div id="parsedSkills"></div>
+    <div class="muted-small" id="parsedCost"></div>
+  </div>
+
+  <!-- STEP 2: Role Selection -->
+  <div class="card hidden" id="roleCard">
+    <h2>Step 2 — Select Target Role</h2>
+    <input type="text" id="targetRole" placeholder="e.g. Software Development Engineer (SDE) - Entry Level" value="Software Development Engineer (SDE) - Entry Level" />
+    <button id="gapBtn" onclick="getSkillGap()">Generate Skill Gap + Roadmap</button>
+    <div class="status" id="gapStatus"></div>
+    <div class="error" id="gapError"></div>
+  </div>
+
+  <!-- Skill Gap + Roadmap Output -->
+  <div class="card hidden" id="resultsCard">
+    <h2>Job Readiness Score</h2>
+    <div class="score-badge" id="readinessScore">-</div>
+
+    <h2 style="margin-top:1.5rem;">Missing Skills</h2>
+    <div id="missingSkills"></div>
+
+    <h2 style="margin-top:1.5rem;">Your Roadmap</h2>
+    <div id="roadmapSteps"></div>
+
+    <h2 style="margin-top:1.5rem;">Recommended Projects</h2>
+    <div id="recommendedProjects"></div>
+
+    <div class="muted-small" id="gapCost"></div>
+  </div>
+</div>
+
+<script>
+const API_BASE = "http://localhost:8000";
+let parsedResumeData = null;
+
+async function parseResume() {
+  const fileInput = document.getElementById("resumeFile");
+  const statusEl = document.getElementById("parseStatus");
+  const errorEl = document.getElementById("parseError");
+  const btn = document.getElementById("parseBtn");
+
+  errorEl.textContent = "";
+  if (!fileInput.files.length) {
+    errorEl.textContent = "Please choose a resume file first.";
+    return;
+  }
+
+  btn.disabled = true;
+  statusEl.textContent = "Parsing resume with AI... (usually a few seconds)";
+
+  const formData = new FormData();
+  formData.append("file", fileInput.files[0]);
+
+  try {
+    const res = await fetch(`${API_BASE}/api/parse-resume`, {
+      method: "POST",
+      body: formData,
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.detail || `Request failed (${res.status})`);
+    }
+    const result = await res.json();
+    parsedResumeData = result.data;
+    renderParsedResume(result);
+    document.getElementById("roleCard").classList.remove("hidden");
+    statusEl.textContent = "Done.";
+  } catch (err) {
+    errorEl.textContent = `Error: ${err.message}`;
+    statusEl.textContent = "";
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderParsedResume(result) {
+  const data = result.data;
+  document.getElementById("parsedCard").classList.remove("hidden");
+  document.getElementById("parsedName").textContent = data.name || "(name not found)";
+
+  const skillsEl = document.getElementById("parsedSkills");
+  skillsEl.innerHTML = "";
+  (data.skills || []).forEach(skill => {
+    const tag = document.createElement("span");
+    tag.className = "skill-tag";
+    tag.textContent = skill;
+    skillsEl.appendChild(tag);
+  });
+
+  document.getElementById("parsedCost").textContent =
+    `Tokens used: ${result.usage.input_tokens} in / ${result.usage.output_tokens} out`;
+}
+
+async function getSkillGap() {
+  const statusEl = document.getElementById("gapStatus");
+  const errorEl = document.getElementById("gapError");
+  const btn = document.getElementById("gapBtn");
+  const role = document.getElementById("targetRole").value.trim();
+
+  errorEl.textContent = "";
+  if (!role) {
+    errorEl.textContent = "Please enter a target role.";
+    return;
+  }
+  if (!parsedResumeData) {
+    errorEl.textContent = "Please parse a resume first.";
+    return;
+  }
+
+  btn.disabled = true;
+  statusEl.textContent = "Generating skill gap + roadmap... (can take 10-20 seconds)";
+
+  const skillsSummary = (parsedResumeData.skills || []).join(", ") || "No skills extracted";
+
+  const formData = new FormData();
+  formData.append("role", role);
+  formData.append("skills", skillsSummary);
+
+  try {
+    const res = await fetch(`${API_BASE}/api/skill-gap`, {
+      method: "POST",
+      body: formData,
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.detail || `Request failed (${res.status})`);
+    }
+    const result = await res.json();
+    renderSkillGap(result);
+    statusEl.textContent = "Done.";
+  } catch (err) {
+    errorEl.textContent = `Error: ${err.message}`;
+    statusEl.textContent = "";
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderSkillGap(result) {
+  const data = result.data;
+  document.getElementById("resultsCard").classList.remove("hidden");
+
+  document.getElementById("readinessScore").textContent =
+    (data.job_readiness_score !== undefined ? data.job_readiness_score : "-") + "/100";
+
+  const missingEl = document.getElementById("missingSkills");
+  missingEl.innerHTML = "";
+  (data.missing_skills || []).forEach(item => {
+    const div = document.createElement("div");
+    div.className = `gap-item priority-${item.priority || "medium"}`;
+    div.innerHTML = `<strong>${item.skill}</strong> <span class="muted-small">(${item.priority} priority)</span><br/><span class="muted-small">${item.why_it_matters || ""}</span>`;
+    missingEl.appendChild(div);
+  });
+
+  const roadmapEl = document.getElementById("roadmapSteps");
+  roadmapEl.innerHTML = "";
+  (data.roadmap || []).forEach(step => {
+    const div = document.createElement("div");
+    div.className = "step-item";
+    const resources = (step.resources || []).join(", ");
+    div.innerHTML = `<div class="step-title">Step ${step.step}: ${step.title} <span class="muted-small">(~${step.estimated_weeks} weeks)</span></div><div>${step.description || ""}</div><div class="muted-small">Resources: ${resources}</div>`;
+    roadmapEl.appendChild(div);
+  });
+
+  const projectsEl = document.getElementById("recommendedProjects");
+  projectsEl.innerHTML = "";
+  (data.recommended_projects || []).forEach(project => {
+    const div = document.createElement("div");
+    div.className = "project-item";
+    const skills = (project.skills_practiced || []).join(", ");
+    div.innerHTML = `<strong>${project.title}</strong><br/>${project.description || ""}<br/><span class="muted-small">Practices: ${skills}</span>`;
+    projectsEl.appendChild(div);
+  });
+
+  document.getElementById("gapCost").textContent =
+    `Tokens used: ${result.usage.input_tokens} in / ${result.usage.output_tokens} out`;
+}
+</script>
+</body>
+</html>
