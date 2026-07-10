@@ -1,5 +1,4 @@
 .env
-config.js
 venv/
 __pycache__/
 *.pyc
